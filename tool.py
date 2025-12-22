@@ -15,12 +15,12 @@ class PacketSniffer:
         self.continue_analyzing = True
         self.interface = None
         self.stop_sniffing = False
-        
-        # Setup signal handler for Ctrl+C
+        self.packet_timestamps = []
+       
+
         signal.signal(signal.SIGINT, self.signal_handler)
     
     def signal_handler(self, sig, frame):
-        """Handle Ctrl+C gracefully"""
         if not self.stop_sniffing:
             self.stop_sniffing = True
             print("\n\nCaught Ctrl+C! Stopping capture...")
@@ -90,6 +90,117 @@ class PacketSniffer:
                 protocol = "ICMP"
         
         print(f"[{timestamp}] {src:15} -> {dst:15} | {protocol}")
+
+    def detect_anomalies(self):
+        anomalies = []
+        if len(self.captured_packets) < 10:
+            return anomalies
+
+        syn_packets = {}
+        ack_packets = {}
+
+        for pkt in self.captured_packets:
+            if TCP in pkt and IP in pkt:
+                src = pkt[IP] in pkt
+                flags = pkt[TCP].flags
+
+                if flags & 0x02:
+                    syn_packets[src] = syn_packets.get(src, 0) + 1
+
+                if flags & 0x10:
+                    ack_packets[src] = ack_packets.get(src, 0) + 1
+
+        for src_ip, syn_count in syn_packets.items():
+            ack_count = ack_packets.get(src_ip, 0)
+            if syn_count > 10 and (ack_count < syn_count * 0.3):
+                anomalies.append({
+                    'type' : 'SYN Flood',
+                    'severity' : 'HIGH',
+                    'description' : f'Possible SYN flood from {src_ip}',
+                    'details' : f'{syn_count} SYN packets, only {ack_count} ACKs'
+                })
+
+        port_scan = {}
+        for pkt in self.captured_packets:
+            if TCP in pkt and IP in pkt:
+                src = pkt[IP].src
+                dst_port = pkt[TCP].dport
+                if src not in port_scan:
+                    port_scan[src] = set()
+                port_scan[src].add(dst_port)
+        
+        for src_ip, ports in port_scan.items():
+            if len(ports) > 20:
+                anomalies.append({
+                    'type': 'Port Scan',
+                    'severity': 'HIGH',
+                    'description': f'Possible port scan from {src_ip}',
+                    'details': f'Attempted connection to {len(ports)} different ports'
+                })
+
+        if len(self.packet_timestamps) > 20:
+            time_windows = []
+            window_size = 5
+            
+            start_time = self.packet_timestamps[0]
+            end_time = self.packet_timestamps[-1]
+            total_duration = (end_time - start_time).total_seconds()
+            
+            if total_duration > 10:
+                for i in range(0, len(self.packet_timestamps) - 1):
+                    current_time = self.packet_timestamps[i]
+                    packets_in_window = sum(1 for t in self.packet_timestamps 
+                                          if current_time <= t < current_time + timedelta(seconds=window_size))
+                    if packets_in_window > 0:
+                        time_windows.append(packets_in_window)
+                
+                if time_windows:
+                    avg_rate = sum(time_windows) / len(time_windows)
+                    max_rate = max(time_windows)
+                    
+                    if max_rate > avg_rate * 3 and max_rate > 50:
+                        anomalies.append({
+                            'type': 'Traffic Spike',
+                            'severity': 'MEDIUM',
+                            'description': 'Unusual traffic spike detected',
+                            'details': f'Peak: {max_rate} packets/5s, Average: {avg_rate:.1f} packets/5s'
+                        })
+        protocol_count = {}
+        for pkt in self.captured_packets:
+            if IP in pkt:
+                proto = pkt[IP].proto
+                protocol_count[proto] = protocol_count.get(proto, 0) + 1
+        
+        total = len(self.captured_packets)
+        for proto, count in protocol_count.items():
+            percentage = (count / total) * 100
+            if proto not in [6, 17, 1] and percentage > 10:
+                anomalies.append({
+                    'type': 'Unusual Protocol',
+                    'severity': 'LOW',
+                    'description': f'High volume of unusual protocol (ID: {proto})',
+                    'details': f'{count} packets ({percentage:.1f}%)'
+                })
+        dst_sources = {}
+        for pkt in self.captured_packets:
+            if IP in pkt:
+                dst = pkt[IP].dst
+                src = pkt[IP].src
+                if dst not in dst_sources:
+                    dst_sources[dst] = set()
+                dst_sources[dst].add(src)
+        
+        for dst_ip, sources in dst_sources.items():
+            if len(sources) > 15:
+                anomalies.append({
+                    'type': 'Potential DDoS',
+                    'severity': 'HIGH',
+                    'description': f'Many sources targeting {dst_ip}',
+                    'details': f'{len(sources)} different source IPs'
+                })
+        
+        return anomalies
+
 
     def analyze_captured_data(self):
         while self.continue_analyzing:
@@ -223,6 +334,20 @@ class PacketSniffer:
             sorted_ips = sorted(ip_stats.items(), key=lambda x: x[1], reverse=True)
             for i, (ip, count) in enumerate(sorted_ips[:5]):
                 print(f"{i+1}. {ip}: {count} packets")
+
+            print("\n" + "="*60)
+        anomalies = self.detect_anomalies()
+        
+        if anomalies:
+            print(f"\n  Found {len(anomalies)} potential security issues:\n")
+            
+            for i, anomaly in enumerate(anomalies, 1):
+                print(f"{i}. [{anomaly['severity']}] {anomaly['type']}")
+                print(f"   Description: {anomaly['description']}")
+                print(f"   Details: {anomaly['details']}")
+                print()
+        else:
+            print("\nNo anomalies detected - traffic appears normal\n")
 
     def display_detailed_output(self):
         print("\nDETAILED PACKET ANALYSIS")
